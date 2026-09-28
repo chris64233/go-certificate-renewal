@@ -395,7 +395,7 @@ func TestCancelPendingIssuanceVoidsOutbox(t *testing.T) {
 	if len(outbox) != 1 || outbox[0].Status != OutboxStatusCancelled {
 		t.Fatalf("outbox should be voided, got %+v", outbox)
 	}
-	if _, err := svc.ConfirmIssuance("o1", "iss-1"); err == nil {
+	if _, err := svc.ConfirmIssuance("o1", "iss-1", testMaterial()); err == nil {
 		t.Fatal("cancelled order must not confirm issuance")
 	} else {
 		requireKind(t, err, KindState)
@@ -464,7 +464,7 @@ func TestConfirmIssuanceFlow(t *testing.T) {
 	svc := newTestService(t, newFakeClock())
 	res := mustCreate(t, svc, "o1", []string{"a.example.com"}, time.Hour)
 
-	if _, err := svc.ConfirmIssuance("o1", "iss-1"); err == nil {
+	if _, err := svc.ConfirmIssuance("o1", "iss-1", testMaterial()); err == nil {
 		t.Fatal("active order cannot confirm issuance")
 	} else {
 		requireKind(t, err, KindState)
@@ -472,7 +472,7 @@ func TestConfirmIssuanceFlow(t *testing.T) {
 
 	mustCallback(t, svc, "o1", "a.example.com", "cb-1", res.Secrets["a.example.com"], OutcomeSuccess)
 
-	view, err := svc.ConfirmIssuance("o1", "iss-1")
+	view, err := svc.ConfirmIssuance("o1", "iss-1", testMaterial())
 	if err != nil || view.Status != OrderStatusIssued || view.IssuanceID != "iss-1" {
 		t.Fatalf("confirm: %v %+v", err, view)
 	}
@@ -481,11 +481,13 @@ func TestConfirmIssuanceFlow(t *testing.T) {
 		t.Fatalf("outbox should be done, got %+v", outbox)
 	}
 
-	// 幂等确认：同 issuanceID 稳定返回，不同 issuanceID 报冲突。
-	if _, err := svc.ConfirmIssuance("o1", "iss-1"); err != nil {
+	// 幂等确认：同 issuanceID + 相同材料稳定返回，换 issuanceID 或材料报冲突。
+	if _, err := svc.ConfirmIssuance("o1", "iss-1", testMaterial()); err != nil {
 		t.Fatalf("repeat confirm should be idempotent: %v", err)
 	}
-	_, err = svc.ConfirmIssuance("o1", "iss-2")
+	_, err = svc.ConfirmIssuance("o1", "iss-2", testMaterial())
+	requireKind(t, err, KindConflict)
+	_, err = svc.ConfirmIssuance("o1", "iss-1", CertMaterial{CertPEM: "other-cert", KeyPEM: "other-key"})
 	requireKind(t, err, KindConflict)
 }
 
@@ -495,7 +497,7 @@ func TestCallbacksAfterIssuedReturnStableResults(t *testing.T) {
 	secret := res.Secrets["a.example.com"]
 
 	mustCallback(t, svc, "o1", "a.example.com", "cb-1", secret, OutcomeSuccess)
-	if _, err := svc.ConfirmIssuance("o1", "iss-1"); err != nil {
+	if _, err := svc.ConfirmIssuance("o1", "iss-1", testMaterial()); err != nil {
 		t.Fatalf("confirm: %v", err)
 	}
 

@@ -51,6 +51,7 @@ func NewService(p Persister, opts ...Option) (*Service, error) {
 	if snap == nil {
 		snap = newSnapshot()
 	}
+	snap.ensure()
 	s := &Service{data: snap, persister: p, now: time.Now}
 	for _, opt := range opts {
 		opt(s)
@@ -339,11 +340,16 @@ func (s *Service) AdvanceExpiry() ([]string, error) {
 	return expired, nil
 }
 
-// ConfirmIssuance 确认签发完成：pending_issuance -> issued，并办结 outbox。
-// 对已签发订单用同一 issuanceID 重复确认是幂等的；换 issuanceID 报冲突。
-func (s *Service) ConfirmIssuance(orderID, issuanceID string) (*OrderView, error) {
+// ConfirmIssuance 确认签发完成：pending_issuance -> issued，办结 outbox，
+// 并生成不可变证书版本（staged，不会立即替换当前证书，需经部署计划激活）。
+// 对已签发订单用同一 issuanceID + 相同材料重复确认是幂等的；
+// 换 issuanceID 或材料不同报 KindConflict。
+func (s *Service) ConfirmIssuance(orderID, issuanceID string, material CertMaterial) (*OrderView, error) {
 	if issuanceID == "" {
 		return nil, newError(KindValidation, "issuance id is required")
+	}
+	if material.CertPEM == "" || material.KeyPEM == "" {
+		return nil, newError(KindValidation, "cert and key material are required")
 	}
 
 	s.mu.Lock()
@@ -364,17 +370,32 @@ func (s *Service) ConfirmIssuance(orderID, issuanceID string) (*OrderView, error
 				msg.Status = OutboxStatusDone
 			}
 		}
+		// 生成不可变证书版本：ID 由订单派生，重复确认不会重建；
+		// 秘密材料只持久化，任何查询视图都不携带。
+		cv := &CertVersion{
+			ID:         certVersionID(order.ID),
+			OrderID:    order.ID,
+			IssuanceID: issuanceID,
+			CertDigest: hashParts(material.CertPEM),
+			KeyDigest:  hashParts(material.KeyPEM),
+			Material:   &CertMaterial{CertPEM: material.CertPEM, KeyPEM: material.KeyPEM},
+			Status:     CertVersionStaged,
+			CreatedAt:  now,
+		}
+		s.data.CertVersions[cv.ID] = cv
 		if err := s.persistLocked(); err != nil {
 			return nil, err
 		}
 		v := orderView(order)
 		return &v, nil
 	case OrderStatusIssued:
-		if order.IssuanceID == issuanceID {
+		cv := s.data.CertVersions[certVersionID(order.ID)]
+		if order.IssuanceID == issuanceID && cv != nil &&
+			cv.CertDigest == hashParts(material.CertPEM) && cv.KeyDigest == hashParts(material.KeyPEM) {
 			v := orderView(order)
 			return &v, nil
 		}
-		return nil, newError(KindConflict, "order %q already issued with different issuance id", orderID)
+		return nil, newError(KindConflict, "order %q already issued with different issuance id or material", orderID)
 	case OrderStatusExpired:
 		return nil, newError(KindExpired, "order %q expired at %s", order.ID, order.Deadline.Format(time.RFC3339))
 	default:
