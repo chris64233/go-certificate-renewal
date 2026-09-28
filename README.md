@@ -10,7 +10,7 @@
 
 ## 功能概览
 
-`Service` 支持聚合多域名挑战的证书续期订单，提供六个操作：
+`Service` 支持聚合多域名挑战的证书续期订单，提供以下操作：
 
 | 方法 | 说明 |
 | --- | --- |
@@ -18,7 +18,7 @@
 | `HandleCallback` | 处理挑战回调，支持重复、乱序、迟到投递 |
 | `CancelOrder` | 取消订单（active / pending_issuance 可取消，重复取消幂等） |
 | `AdvanceExpiry` | 过期推进：把已过截止时间的 active 订单置为 expired |
-| `ConfirmIssuance` | 签发确认：pending_issuance → issued，并办结 outbox |
+| `ConfirmIssuance` | 签发确认：pending_issuance → issued，办结 outbox，并生成不可变证书版本（staged） |
 | `GetOrder` / `ListOutbox` | 查询订单与挑战状态（不暴露秘密摘要）、轮询 outbox |
 
 ### 订单状态机
@@ -30,6 +30,63 @@ pending_issuance --(取消)--> cancelled   （同时作废已写出的 outbox）
 ```
 
 `cancelled`、`expired`、`issued` 均为终态，任何迟到回调都不能让订单复活。
+
+## 分阶段部署与激活
+
+签发确认只生成 `staged` 状态的不可变证书版本，**不会立即替换当前证书**。
+新证书通过部署计划分阶段推向节点：
+
+| 方法 | 说明 |
+| --- | --- |
+| `CreatePlan` | 创建部署计划：冻结目标节点集合、预检门槛与失败阈值（幂等创建） |
+| `ClaimNode` | 节点领取证书：返回秘密材料与递增的执行版本（唯一暴露秘密材料的入口） |
+| `ReportPrecheck` | 预检回执：达到冻结门槛后计划原子进入 `activating` |
+| `ReportActivation` | 激活回执：全部节点激活后计划原子完成 |
+| `PausePlan` / `ResumePlan` | 暂停 / 恢复计划（失败数超阈值也会自动暂停） |
+| `RollbackNode` | 把已激活节点回退到原证书版本（首个回退将计划方向闩为 rollback） |
+| `GetPlan` / `ListCertVersions` / `ListNotifications` | 查询计划、证书版本与完成通知（均不暴露秘密材料） |
+
+### 计划状态机
+
+```
+staging --(预检通过数达到门槛)--> activating --(全部节点激活)--> completed
+staging / activating --(失败数超阈值 / 手动)--> paused --(恢复)--> 回到暂停前阶段
+activating / paused --(已激活节点全部回退)--> rolled_back
+```
+
+`completed` 与 `rolled_back` 为终态。计划完成时在同一临界区内：
+写出**唯一一条**通知事件（`notify-<planID>`）、新证书版本转为 `current`、
+原证书版本标记为 `pending_retirement`（待退役，不直接删除）。
+
+### 节点状态机
+
+```
+pending --(领取)--> claimed --(预检通过)--> prechecked --(激活成功)--> activated
+claimed / prechecked --(失败)--> failed --(重新领取)--> claimed   （执行版本递增）
+activated --(回退)--> rolled_back （终态）
+```
+
+### 回执幂等与防重放
+
+- 每个回执以 `ReceiptID` 为幂等号：**同号同内容**复用首次处理结果，
+  **同号异内容**返回 `conflict`；幂等检查优先于一切状态判断，计划终态后重放仍返回稳定结果。
+- 回执必须**同时**匹配计划、证书摘要（`CertDigest`）与节点执行版本（`ExecVersion`）：
+  摘要不匹配报 `auth`，执行版本过期报 `state`。
+- 节点每次领取都会使执行版本递增，此前轮次签发的回执全部失效；
+  已回退节点是终态，旧计划回执无法让其重新激活旧证书。
+- 回执允许重复、乱序、迟到：状态机拒绝不合法的新回执，重放走幂等记录。
+
+### 回退与激活的单方向并发
+
+计划持有方向闩锁（forward / rollback）：任一节点回退生效后方向永久切为 rollback，
+之后的预检 / 激活回执一律拒绝。所有状态变更都在同一把互斥锁内完成
+“检查 + 迁移 + 持久化”，因此回退与继续激活并发时只有一个方向生效，结果确定。
+
+### 秘密材料的边界
+
+证书秘密材料（cert/key PEM）只在签发确认时写入、节点领取（`ClaimNode`）时返回；
+所有查询视图（`GetPlan`、`ListCertVersions`、`GetOrder` 等）只暴露证书摘要，
+不携带秘密材料与私钥摘要。
 
 ## 关键设计
 
@@ -86,7 +143,9 @@ pending_issuance --(取消)--> cancelled   （同时作废已写出的 outbox）
 ## 代码结构
 
 - `model.go` — 订单、挑战、outbox、回调记录等数据模型与状态枚举
+- `deploy.go` — 证书版本与部署计划：计划创建、节点领取、预检/激活回执、暂停/恢复、回退、查询
 - `service.go` — 业务逻辑：创建、回调、取消、过期推进、签发确认、查询
 - `store.go` — `Persister` 接口与内存 / JSON 文件实现
 - `errors.go` — 错误分类（`Kind`）与 `KindOf`
-- `service_test.go` — 单元测试与并发竞争测试（`-race` 通过）
+- `service_test.go` — 订单与挑战流程的单元测试与并发竞争测试（`-race` 通过）
+- `deploy_test.go` — 分阶段部署的单元测试与并发竞争测试（`-race` 通过）

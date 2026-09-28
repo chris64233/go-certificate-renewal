@@ -12,15 +12,41 @@ import (
 
 // snapshot 是服务的全部持久化状态。
 type snapshot struct {
-	Orders    map[string]*Order                     `json:"orders"`
-	Callbacks map[string]map[string]*CallbackRecord `json:"callbacks"`
-	Outbox    []*OutboxMessage                      `json:"outbox"`
+	Orders        map[string]*Order                     `json:"orders"`
+	Callbacks     map[string]map[string]*CallbackRecord `json:"callbacks"`
+	Outbox        []*OutboxMessage                      `json:"outbox"`
+	CertVersions  map[string]*CertVersion               `json:"cert_versions"`
+	Plans         map[string]*Plan                      `json:"plans"`
+	Receipts      map[string]map[string]*ReceiptRecord  `json:"receipts"`
+	Notifications []Notification                        `json:"notifications"`
 }
 
 func newSnapshot() *snapshot {
 	return &snapshot{
-		Orders:    make(map[string]*Order),
-		Callbacks: make(map[string]map[string]*CallbackRecord),
+		Orders:       make(map[string]*Order),
+		Callbacks:    make(map[string]map[string]*CallbackRecord),
+		CertVersions: make(map[string]*CertVersion),
+		Plans:        make(map[string]*Plan),
+		Receipts:     make(map[string]map[string]*ReceiptRecord),
+	}
+}
+
+// ensure 兼容旧版本持久化状态：补齐后引入的 map 字段。
+func (s *snapshot) ensure() {
+	if s.Orders == nil {
+		s.Orders = make(map[string]*Order)
+	}
+	if s.Callbacks == nil {
+		s.Callbacks = make(map[string]map[string]*CallbackRecord)
+	}
+	if s.CertVersions == nil {
+		s.CertVersions = make(map[string]*CertVersion)
+	}
+	if s.Plans == nil {
+		s.Plans = make(map[string]*Plan)
+	}
+	if s.Receipts == nil {
+		s.Receipts = make(map[string]map[string]*ReceiptRecord)
 	}
 }
 
