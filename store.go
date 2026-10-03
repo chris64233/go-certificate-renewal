@@ -12,15 +12,40 @@ import (
 
 // snapshot 是服务的全部持久化状态。
 type snapshot struct {
-	Orders    map[string]*Order                     `json:"orders"`
-	Callbacks map[string]map[string]*CallbackRecord `json:"callbacks"`
-	Outbox    []*OutboxMessage                      `json:"outbox"`
+	Orders       map[string]*Order                     `json:"orders"`
+	Callbacks    map[string]map[string]*CallbackRecord `json:"callbacks"`
+	Outbox       []*OutboxMessage                      `json:"outbox"`
+	Certificates map[string]*Certificate               `json:"certificates"`
+	Revocations  map[string]*Revocation                `json:"revocations"`
+	// Current 记录域名 -> 服务范围 -> 当前证书号。
+	// 指针只向更新的版本移动：证书被撤销或过期都不会回退到旧版本。
+	Current map[string]map[string]string `json:"current"`
+	// CertSeq 是证书版本序号的单调递增计数器。
+	CertSeq uint64 `json:"cert_seq"`
 }
 
 func newSnapshot() *snapshot {
-	return &snapshot{
-		Orders:    make(map[string]*Order),
-		Callbacks: make(map[string]map[string]*CallbackRecord),
+	s := &snapshot{}
+	s.normalize()
+	return s
+}
+
+// normalize 修复从旧版本快照恢复时可能缺失的字段。
+func (s *snapshot) normalize() {
+	if s.Orders == nil {
+		s.Orders = make(map[string]*Order)
+	}
+	if s.Callbacks == nil {
+		s.Callbacks = make(map[string]map[string]*CallbackRecord)
+	}
+	if s.Certificates == nil {
+		s.Certificates = make(map[string]*Certificate)
+	}
+	if s.Revocations == nil {
+		s.Revocations = make(map[string]*Revocation)
+	}
+	if s.Current == nil {
+		s.Current = make(map[string]map[string]string)
 	}
 }
 
@@ -34,6 +59,7 @@ func cloneSnapshot(s *snapshot) (*snapshot, error) {
 	if err := json.Unmarshal(b, &out); err != nil {
 		return nil, err
 	}
+	out.normalize()
 	return &out, nil
 }
 
@@ -94,6 +120,7 @@ func (f *FilePersister) Load() (*snapshot, error) {
 	if err := json.Unmarshal(b, &snap); err != nil {
 		return nil, fmt.Errorf("decode snapshot: %w", err)
 	}
+	snap.normalize()
 	return &snap, nil
 }
 
