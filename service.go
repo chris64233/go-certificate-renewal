@@ -51,6 +51,7 @@ func NewService(p Persister, opts ...Option) (*Service, error) {
 	if snap == nil {
 		snap = newSnapshot()
 	}
+	snap.normalize()
 	s := &Service{data: snap, persister: p, now: time.Now}
 	for _, opt := range opts {
 		opt(s)

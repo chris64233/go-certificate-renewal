@@ -17,6 +17,8 @@ const (
 	KindExpired Kind = "expired"
 	// KindState 当前状态不允许该操作（如重复完成挑战、取消已签发订单）。
 	KindState Kind = "state"
+	// KindRevoked 证书已被撤销，不能继续激活或使用。
+	KindRevoked Kind = "revoked"
 	// KindConflict 幂等冲突：同一幂等号携带了不同的内容。
 	KindConflict Kind = "conflict"
 	// KindValidation 请求参数不合法。

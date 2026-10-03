@@ -77,3 +77,62 @@ type CallbackRecord struct {
 	OrderStatus     OrderStatus     `json:"order_status"`
 	ProcessedAt     time.Time       `json:"processed_at"`
 }
+
+// ActivationStage 描述证书版本的分阶段激活进度。
+//
+//	pending -> canary -> partial -> full
+//
+// 阶段只能前进不能后退；每个阶段激活服务范围的一个确定性前缀子集，
+// 进入 full 时证书覆盖其全部服务范围。
+type ActivationStage string
+
+const (
+	StagePending ActivationStage = "pending"
+	StageCanary  ActivationStage = "canary"
+	StagePartial ActivationStage = "partial"
+	StageFull    ActivationStage = "full"
+)
+
+// stageLevel 返回阶段的推进序号，pending 为 0，full 为 3。
+func stageLevel(s ActivationStage) int {
+	switch s {
+	case StageCanary:
+		return 1
+	case StagePartial:
+		return 2
+	case StageFull:
+		return 3
+	default:
+		return 0
+	}
+}
+
+// Certificate 是一个证书版本。域名与服务范围在注册时冻结；
+// Seq 是单调递增的版本序号，用于判定新旧，保证旧版本不能重新成为当前证书。
+type Certificate struct {
+	ID           string          `json:"id"`
+	Domain       string          `json:"domain"`
+	Scopes       []string        `json:"scopes"`
+	Stage        ActivationStage `json:"stage"`
+	Seq          uint64          `json:"seq"`
+	NotAfter     time.Time       `json:"not_after"`
+	CreatedAt    time.Time       `json:"created_at"`
+	UpdatedAt    time.Time       `json:"updated_at"`
+	RevokedAt    *time.Time      `json:"revoked_at,omitempty"`
+	RevocationID string          `json:"revocation_id,omitempty"`
+}
+
+// Revoked 报告证书是否已被撤销。
+func (c *Certificate) Revoked() bool { return c.RevokedAt != nil }
+
+// Revocation 是一条撤销记录，保存证书、域名、撤销时的激活阶段与服务范围。
+// RevocationID 是幂等号：同号同内容复用原结果，同号异内容报冲突。
+type Revocation struct {
+	ID          string          `json:"id"`
+	CertID      string          `json:"cert_id"`
+	Domain      string          `json:"domain"`
+	Stage       ActivationStage `json:"stage"`
+	Scopes      []string        `json:"scopes"`
+	ContentHash string          `json:"content_hash"`
+	CreatedAt   time.Time       `json:"created_at"`
+}
